@@ -1,0 +1,162 @@
+---
+title: "Peer correlations"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(DBI)
+library(RSQLite)
+library(tidyverse)
+library(lubridate)
+library(glue)
+library(gt)
+library(tibbletime)
+
+library(oqthemes)       # devtools::install_github("https://github.com/orderlyquant/oqthemes.git")
+library(hrbrthemes)     # devtools::install_github("https://github.com/hrbrmstr/hrbrthemes.git")
+
+base_dir <- here::here("")
+db_file <- fs::path(base_dir, "SECDB")
+if(dbCanConnect(RSQLite::SQLite(), db_file)) {
+    secdb <- dbConnect(RSQLite::SQLite(), db_file)
+}
+
+source(fs::path(base_dir, "database_functions.R"))
+source(fs::path(base_dir, "peer_functions.R"))
+
+
+knitr::opts_chunk$set(
+    connection = "secdb", # automatically uses this connection in sql chunks 
+    comment = "#>", 
+    collapse = TRUE, 
+    message = FALSE,
+    fig.width = 8,
+    fig.asp = ((1 + sqrt(5)) / 2) - 1, # the golden ratio - technically, the b proportion of a+b when a is 1
+    out.width = "70%",
+    fig.align = "center"
+)
+
+global_tbl_options <- function(gt) {
+  gt %>%
+  tab_options(
+    # table.align = "left",
+    table.font.size = "small",
+    data_row.padding = px(5)
+  ) %>%
+  opt_align_table_header(align = "left") %>%
+    opt_all_caps() %>%
+    opt_row_striping(FALSE)
+}
+```
+
+## Prepare correlation data set
+
+```{r}
+
+cur_sec <- "AAPL"
+start_date <- "2019-12-31"
+end_date <- "2020-06-30"
+
+```
+
+```{r echo=FALSE}
+
+cor_list <- prep_peer_correlation_data_by_symbol(secdb, cur_sec, from = start_date, to = end_date)
+
+```
+
+
+### Full-period return plot (top/bottom by return)
+
+```{r plot_tret_index, echo = FALSE, warning=FALSE, message=FALSE}
+
+create_peer_return_plot(cor_list)
+
+```
+
+
+### Full-period correlation table (top-10 by correlation)
+```{r echo=FALSE}
+
+top_cor <- cor_list$full_cor %>% 
+    arrange(desc(cor)) %>%
+    head(10) %>%
+    left_join(
+        cor_list$full_ret %>% select(uid_2, tret_rel),
+        by = "uid_2"
+    ) %>%
+    select(-contains("uid")) %>%
+    gt() %>%
+    tab_header(
+        title = cor_list$base_name,
+        subtitle = md("*Correlation and relative return*")
+    ) %>%
+    tab_source_note(
+        source_note = md(glue("*Data from: {cor_list$data_start} to {cor_list$data_end}*"))
+    ) %>%
+    fmt_percent(
+        columns = c("cor", "tret_rel"),
+        decimals = 1
+    ) %>%
+    global_tbl_options()
+
+top_cor
+
+```
+
+
+```{r}
+
+# setup a 30-day rolling window correlation function
+cor_roll <- rollify(~cor(.x, .y), window = 30)
+
+rolling_cor_tbl <-
+  cor_list$tbl %>%
+  group_by(uid_2) %>%
+  mutate(cor = cor_roll(total_return_1, total_return_2))
+
+rolling_summary_tbl <- rolling_cor_tbl %>%
+  drop_na() %>%
+  group_by(uid_2) %>%
+  summarize(
+    min = min(cor),
+    mean = mean(cor),
+    max = max(cor)
+  ) %>%
+  rename(uid = uid_2) %>%
+  left_join(
+    cor_list$peers %>% select(uid, "symbol", "name"),
+    by = "uid"
+  ) %>%
+  select(uid, symbol, name, min, mean, max)
+
+rolling_summary_tbl %>%
+    arrange(desc(mean)) %>%
+    head(10) %>%
+    left_join(
+        cor_list$full_ret %>% select(uid_2, tret_rel) %>% rename(uid = uid_2),
+        by = "uid"
+    ) %>%
+    select(-contains("uid")) %>%
+    gt() %>%
+    tab_header(
+        title = cor_list$base_name,
+        subtitle = md("*Correlation and relative return*")
+    ) %>%
+    tab_source_note(
+        source_note = md(glue("*Data from: {cor_list$data_start} to {cor_list$data_end}*"))
+    ) %>%
+    fmt_percent(
+        columns = c("min", "mean", "max", "tret_rel"),
+        decimals = 1
+    ) %>%
+    global_tbl_options()
+
+top_cor
+
+
+
+
+```
+
+
