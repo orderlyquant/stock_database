@@ -53,9 +53,9 @@ prep_peer_correlation_data_by_symbol <- function(con, in.symbol, from = NULL, to
         summarize(
             tret_1 = (last(adjusted_price_1) / first(adjusted_price_1))-1,
             tret_2 = (last(adjusted_price_2) / first(adjusted_price_2))-1,
-            tret_rel = tret_2 - tret_1,
-            .groups = "keep"
-        )
+            tret_rel = tret_2 - tret_1
+        ) %>%
+        ungroup()
     
     return(
         list(

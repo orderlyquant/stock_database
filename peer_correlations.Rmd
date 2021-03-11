@@ -27,7 +27,8 @@ source(fs::path(base_dir, "peer_functions.R"))
 
 knitr::opts_chunk$set(
     connection = "secdb", # automatically uses this connection in sql chunks 
-    comment = "#>", 
+    comment = "#>",
+    echo = FALSE,
     collapse = TRUE, 
     message = FALSE,
     fig.width = 8,
@@ -51,7 +52,7 @@ global_tbl_options <- function(gt) {
 
 ## Prepare correlation data set
 
-```{r}
+```{r echo=TRUE}
 
 cur_sec <- "AAPL"
 start_date <- "2019-12-31"
@@ -59,7 +60,7 @@ end_date <- "2020-06-30"
 
 ```
 
-```{r echo=FALSE}
+```{r}
 
 cor_list <- prep_peer_correlation_data_by_symbol(secdb, cur_sec, from = start_date, to = end_date)
 
@@ -76,7 +77,7 @@ create_peer_return_plot(cor_list)
 
 
 ### Full-period correlation table (top-10 by correlation)
-```{r echo=FALSE}
+```{r}
 
 top_cor <- cor_list$full_cor %>% 
     arrange(desc(cor)) %>%
@@ -115,47 +116,253 @@ rolling_cor_tbl <-
   group_by(uid_2) %>%
   mutate(cor = cor_roll(total_return_1, total_return_2))
 
-rolling_summary_tbl <- rolling_cor_tbl %>%
+# setup a period return function
+period_return <- function(price_vec) {
+  return(
+    (last(price_vec) / first(price_vec)) - 1
+  )
+}
+
+# setup a 30-day rolling return function
+period_return_roll <- rollify(~period_return(.x), window = 30)
+
+rolling_return_tbl <-
+  cor_list$tbl %>%
+  group_by(uid_2) %>%
+  arrange(effective_date) %>%
+  mutate(
+    period_return_1 = period_return_roll(adjusted_price_1),
+    period_return_2 = period_return_roll(adjusted_price_2),
+    relative_return = period_return_2 - period_return_1
+  ) %>%
+  ungroup()
+```
+
+```{r echo=FALSE, eval=FALSE}
+
+# Data checks
+
+ret_dates <- rolling_return_tbl$effective_date %>% unique() %>% sort()
+
+# use 30 to match the rolling return window
+period_dates <- ret_dates %>% tail(30) %>% range()
+
+rolling_return_tbl %>%
+  tail(20) %>%
+  select(effective_date, uid_1, uid_2, period_return_1, period_return_2, relative_return)
+
+get_security_period_total_return <- function(con, symbol, start, end) {
+  adj_price_tbl <- db_get_adjusted_price_by_symbol(con, symbol)
+  
+  adj_price_tbl %>%
+    filter(between(effective_date, start, end)) %>%
+    summarize(
+      ret = period_return(adjusted_price)
+    ) %>%
+    pull(ret)
+
+}
+
+get_security_period_total_return(secdb, "AAPL", period_dates[1], period_dates[2])
+get_security_period_total_return(secdb, "VNT", period_dates[1], period_dates[2])
+
+
+```
+
+
+```{r}
+
+cor_summary_tbl <- rolling_cor_tbl %>%
   drop_na() %>%
   group_by(uid_2) %>%
   summarize(
-    min = min(cor),
-    mean = mean(cor),
-    max = max(cor)
+    min_cor    =   min(cor),
+    mean_cor   =   mean(cor),
+    median_cor = median(cor),
+    max_cor    =    max(cor)
   ) %>%
-  rename(uid = uid_2) %>%
+  rename(uid = uid_2)
+
+ret_summary_tbl <- rolling_return_tbl %>%
+  drop_na() %>%
+  group_by(uid_2) %>%
+  summarize(
+    min_ret    =    min(relative_return),
+    mean_ret   =   mean(relative_return),
+    median_ret = median(relative_return),
+    max_ret    =    max(relative_return)
+  ) %>%
+  rename(uid = uid_2)
+
+
+rolling_summary_tbl <-
   left_join(
     cor_list$peers %>% select(uid, "symbol", "name"),
+    ret_summary_tbl,
     by = "uid"
   ) %>%
-  select(uid, symbol, name, min, mean, max)
+  left_join(
+    cor_summary_tbl,
+    by = "uid"
+  ) %>%
+  drop_na()
 
+```
+
+
+## Rolling returns summary
+
+```{r}
+
+# rolling return table
 rolling_summary_tbl %>%
+    select(
+      uid, symbol, name,
+      min    =    min_ret,
+      mean   =   mean_ret,
+      median = median_ret,
+      max    =    max_ret
+    ) %>%
     arrange(desc(mean)) %>%
     head(10) %>%
-    left_join(
-        cor_list$full_ret %>% select(uid_2, tret_rel) %>% rename(uid = uid_2),
-        by = "uid"
-    ) %>%
     select(-contains("uid")) %>%
     gt() %>%
     tab_header(
         title = cor_list$base_name,
-        subtitle = md("*Correlation and relative return*")
+        subtitle = md("*Summary of rolling 30-day returns*")
     ) %>%
     tab_source_note(
         source_note = md(glue("*Data from: {cor_list$data_start} to {cor_list$data_end}*"))
     ) %>%
     fmt_percent(
-        columns = c("min", "mean", "max", "tret_rel"),
+        columns = 3:6,
         decimals = 1
     ) %>%
     global_tbl_options()
 
-top_cor
+```
+
+
+## Rolling correlations summary
+
+```{r}
+
+# rolling correlation table
+roll_cor <- rolling_summary_tbl %>%
+    select(
+      uid, symbol, name,
+      min    =    min_cor,
+      mean   =   mean_cor,
+      median = median_cor,
+      max    =    max_cor
+    ) %>%
+    arrange(desc(mean)) %>%
+    head(10) %>%
+    select(-contains("uid")) %>%
+    gt() %>%
+    tab_header(
+        title = cor_list$base_name,
+        subtitle = md("*Summary of rolling 30-day correlations*")
+    ) %>%
+    tab_source_note(
+        source_note = md(glue("*Data from: {cor_list$data_start} to {cor_list$data_end}*"))
+    ) %>%
+    fmt_percent(
+        columns = 3:6,
+        decimals = 1
+    ) %>%
+    global_tbl_options()
+
+roll_cor
+
+```
 
 
 
+```{r}
+
+ranking_tbl <- 
+  rolling_summary_tbl %>% select(uid, symbol, name, median_ret, median_cor, min_ret) %>%
+  left_join(
+    cor_list$full_ret %>% select(uid = uid_2, full_ret = tret_rel),
+    by = "uid"
+  ) %>%
+  left_join(
+    cor_list$full_cor %>% select(uid = uid_2, full_cor = cor),
+    by = "uid"
+  ) %>%
+  mutate(
+    rank_full_ret   = rank(desc(full_ret),   ties.method = "min"),
+    rank_full_cor   = rank(desc(full_cor),   ties.method = "min"),
+    rank_median_ret = rank(desc(median_ret), ties.method = "min"),
+    rank_median_cor = rank(desc(median_cor), ties.method = "min"),
+    rank_min_ret    = rank(desc(min_ret),    ties.method = "min"),
+    overall         = rank_full_ret +
+                      (0.5 * rank_full_cor) + 
+                      rank_median_ret + 
+                      (0.5 * rank_median_cor) +
+                      rank_min_ret,
+    rank_overall    = rank(overall, ties.method = "min")
+  ) %>%
+  arrange(rank_overall)
+
+ten_best <- ranking_tbl %>% head(10) %>% select(uid, symbol, name)
+
+```
+
+## Substitution rankings
+
+```{r}
+
+ranking_tbl %>%
+  head(10) %>%
+  select(
+      symbol, name,
+      `rel. return period` = rank_full_ret,
+      `correlation period` = rank_full_cor,
+      `median rolling rel. return` = rank_median_ret,
+      `median rolling correlation` = rank_median_cor,
+      `minimum rolling rel. return` = rank_min_ret,
+      overall
+    ) %>%
+    gt() %>%
+    tab_header(
+        title = cor_list$base_name,
+        subtitle = md("*Substitution summary*")
+    ) %>%
+    tab_source_note(
+        source_note = md(glue("*Data from: {cor_list$data_start} to {cor_list$data_end}*"))
+    ) %>%
+    global_tbl_options()
+
+```
+
+## Top 10 rolling returns summary
+
+```{r fig.width = 8, fig.asp = ((1 + sqrt(5)) / 2) - 1, out.width = "100%", fig.align = "center", dpi=200}
+
+ten_best_rolling <- 
+  ten_best %>%
+  left_join(
+    rolling_return_tbl %>% select(effective_date, uid = uid_2, relative_return),
+    by = "uid"
+  ) %>%
+  drop_na()
+
+ten_best_rolling %>%
+  mutate(symbol = factor(symbol, ten_best$symbol)) %>%
+  ggplot(
+    aes(x = effective_date, y = relative_return)
+  ) +
+  geom_col() +
+  facet_wrap(~symbol) +
+  labs(
+    title = glue("10 Best Substitutes for {cor_list$base_name}"),
+    subtitle = "Rolling 30-day relative returns",
+    x = NULL, y = NULL
+  ) +
+  hrbrthemes::scale_y_percent() +
+  theme_ipsum()
 
 ```
 
